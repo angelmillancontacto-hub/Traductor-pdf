@@ -1,5 +1,5 @@
 import streamlit as st
-import fitz  # PyMuPDF
+import fitz
 from docx import Document
 from fpdf import FPDF
 from pdf2image import convert_from_bytes
@@ -9,15 +9,13 @@ import io
 import re
 import time
 import os
-from groq import Groq
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from groq import Groq, RateLimitError, APIError
 
 # ------------------------------------------------------------
 # Configuración de la página
 # ------------------------------------------------------------
 st.set_page_config(page_title="Traductor de documentos", layout="wide")
 
-# CSS para botones de descarga más grandes y vistosos
 st.markdown("""
 <style>
     .stDownloadButton button {
@@ -42,13 +40,13 @@ st.title("🌐 Traductor de documentos a cualquier idioma")
 st.markdown("Sube un PDF, imagen o Word y obtén una traducción **natural y con formato**.")
 
 # ------------------------------------------------------------
-# Cliente de Groq (gratuito)
+# Cliente de Groq
 # ------------------------------------------------------------
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 MODELO = "llama-3.3-70b-versatile"
 
 # ------------------------------------------------------------
-# Idiomas disponibles
+# Idiomas
 # ------------------------------------------------------------
 IDIOMAS = {
     "Español": "Spanish",
@@ -67,7 +65,7 @@ IDIOMAS = {
 }
 
 # ------------------------------------------------------------
-# Extracción de texto (PDF, imagen, Word)
+# Funciones de extracción de texto
 # ------------------------------------------------------------
 def extraer_texto_pdf(pdf_file):
     doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
@@ -88,61 +86,51 @@ def extraer_texto_docx(docx_file):
     doc = Document(docx_file)
     return "\n".join([para.text for para in doc.paragraphs])
 
+def pdf_tiene_texto(pdf_file):
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+    tiene = any(page.get_text().strip() for page in doc)
+    pdf_file.seek(0)
+    return tiene
+
 # ------------------------------------------------------------
-# División en trozos respetando secciones (doble salto de línea)
+# División en chunks
 # ------------------------------------------------------------
-def dividir_texto(texto, max_chars=6000):
-    """Divide el texto en bloques basados en párrafos, pero sin romper secciones."""
-    secciones = texto.split('\n\n')  # separamos por párrafos dobles
+def dividir_texto(texto, max_chars=4000):
+    parrafos = texto.split('\n')
     chunks = []
-    chunk_actual = ""
-    for sec in secciones:
-        if len(chunk_actual) + len(sec) < max_chars:
-            chunk_actual += sec + "\n\n"
+    actual = ""
+    for p in parrafos:
+        if len(actual) + len(p) + 1 <= max_chars:
+            actual += p + "\n"
         else:
-            if chunk_actual.strip():
-                chunks.append(chunk_actual.strip())
-            # Si una sola sección es más grande que max_chars, la dividimos por líneas
-            if len(sec) > max_chars:
-                lineas = sec.split('\n')
-                sub_chunk = ""
-                for linea in lineas:
-                    if len(sub_chunk) + len(linea) < max_chars:
-                        sub_chunk += linea + "\n"
-                    else:
-                        if sub_chunk.strip():
-                            chunks.append(sub_chunk.strip())
-                        sub_chunk = linea + "\n"
-                if sub_chunk.strip():
-                    chunks.append(sub_chunk.strip())
+            if actual.strip():
+                chunks.append(actual.strip())
+            if len(p) > max_chars:
+                for i in range(0, len(p), max_chars):
+                    chunks.append(p[i:i+max_chars])
+                actual = ""
             else:
-                chunk_actual = sec + "\n\n"
-    if chunk_actual.strip():
-        chunks.append(chunk_actual.strip())
+                actual = p + "\n"
+    if actual.strip():
+        chunks.append(actual.strip())
     return chunks
 
 # ------------------------------------------------------------
-# Traducción con Groq (prompt mejorado para integridad y naturalidad)
+# Traducción (sin tenacity, con reintentos manuales)
 # ------------------------------------------------------------
-@retry(
-    retry=retry_if_exception_type(Exception),
-    wait=wait_exponential(multiplier=2, min=2, max=30),
-    stop=stop_after_attempt(3)
-)
 def traducir_chunk(texto, idioma_origen, idioma_destino, contexto=""):
     origen_str = "el idioma detectado automáticamente" if idioma_origen == "auto" else idioma_origen
 
-    prompt = f"""Eres un traductor profesional especializado en conservar el formato y la integridad del texto.
-Antes de traducir, analiza el estilo y tono del texto original (formal, técnico, informal, etc.).
-Traduce el siguiente fragmento del {origen_str} al {idioma_destino} de manera **natural y fluida**, como si hubiera sido escrito originalmente en {idioma_destino}.
-**NO omitas ningún contenido:** conserva todos los títulos, párrafos, listas, notas al pie y cualquier elemento presente.
-Mantén el formato Markdown exactamente: encabezados (#, ##), negritas (**texto**), cursivas (*texto*), listas (- o 1.), enlaces, etc.
-No añadas explicaciones ni comentarios, solo la traducción final.
+    if contexto:
+        prompt = f"""Eres un traductor profesional. Traduce el siguiente fragmento del {origen_str} al {idioma_destino} de manera **natural y fluida**. Conserva **exactamente** el formato Markdown original (títulos, listas, negritas, cursivas, enlaces). No omitas ningún contenido.
+Contexto del documento (solo para orientar el estilo): {contexto}
 
-Contexto del documento (para referencia):
-{contexto}
+Texto original:
+{texto}"""
+    else:
+        prompt = f"""Eres un traductor profesional. Traduce el siguiente fragmento del {origen_str} al {idioma_destino} de manera **natural y fluida**. Conserva **exactamente** el formato Markdown original (títulos, listas, negritas, cursivas, enlaces). No omitas ningún contenido.
 
-Texto original a traducir:
+Texto original:
 {texto}"""
 
     respuesta = client.chat.completions.create(
@@ -153,11 +141,29 @@ Texto original a traducir:
     return respuesta.choices[0].message.content
 
 # ------------------------------------------------------------
-# Creación de Word mejorada (Markdown → docx con estilos)
+# Reintento manual para rate limits
+# ------------------------------------------------------------
+def traducir_con_reintentos(chunk, idioma_origen, idioma_destino, contexto=""):
+    max_intentos = 3
+    esperas = [5, 15, 30]  # segundos de espera progresiva
+    for intento in range(max_intentos):
+        try:
+            return traducir_chunk(chunk, idioma_origen, idioma_destino, contexto)
+        except RateLimitError:
+            if intento < max_intentos - 1:
+                st.warning(f"⚠️ Límite de tasa alcanzado. Esperando {esperas[intento]}s... (intento {intento+1}/{max_intentos})")
+                time.sleep(esperas[intento])
+            else:
+                raise
+        except APIError as e:
+            # Otros errores de la API no se reintentan
+            st.error(f"Error de la API de Groq: {e}")
+            raise
+
+# ------------------------------------------------------------
+# Creación de Word
 # ------------------------------------------------------------
 def aplicar_formato(paragraph, texto):
-    """Aplica negritas y cursivas básicas dentro de un párrafo."""
-    # Dividimos por marcas de Markdown
     partes = re.split(r'(\*\*.*?\*\*|\*.*?\*)', texto)
     for parte in partes:
         if parte.startswith('**') and parte.endswith('**'):
@@ -169,36 +175,40 @@ def aplicar_formato(paragraph, texto):
         else:
             paragraph.add_run(parte)
 
+def crear_docx_desde_markdown(markdown):
+    doc = Document()
+    for linea in markdown.split('\n'):
+        linea = linea.strip()
+        if not linea:
+            doc.add_paragraph('')
+            continue
+        if linea.startswith('#'):
+            nivel = len(re.match(r'^#+', linea).group())
+            doc.add_heading(linea.lstrip('#').strip(), level=min(nivel, 9))
+        elif linea.startswith('- ') or linea.startswith('* '):
+            p = doc.add_paragraph(style='List Bullet')
+            aplicar_formato(p, linea[2:])
+        elif re.match(r'^\d+\.\s', linea):
+            p = doc.add_paragraph(style='List Number')
+            aplicar_formato(p, re.sub(r'^\d+\.\s', '', linea))
+        else:
+            p = doc.add_paragraph()
+            aplicar_formato(p, linea)
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+# ------------------------------------------------------------
+# Creación de PDF (sin fuente externa, solo Helvetica)
+# ------------------------------------------------------------
 def crear_pdf_desde_markdown(markdown):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Helvetica", size=12)
     for linea in markdown.split('\n'):
-        # Reemplazar caracteres no soportados por latin-1
         linea_limpia = linea.encode('latin-1', 'replace').decode('latin-1')
         pdf.multi_cell(0, 10, txt=linea_limpia)
-    return pdf.output(dest='S')
-
-# ------------------------------------------------------------
-# Creación de PDF con fuente latin
-# ------------------------------------------------------------
-def crear_pdf_desde_markdown(markdown):
-    pdf = FPDF()
-    pdf.add_page()
-    # Buscar fuente DejaVu en el sistema
-    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    if not os.path.exists(font_path):
-        # fallback por si no existe (muy raro en Cloud)
-        st.warning("Fuente DejaVu no encontrada. Algunos caracteres podrían no mostrarse correctamente.")
-        pdf.set_font("Arial", size=12)
-    else:
-        pdf.add_font("DejaVu", "", font_path, uni=True)
-        pdf.set_font("DejaVu", size=12)
-
-    for linea in markdown.split('\n'):
-        # Limpiamos caracteres de control
-        linea = linea.replace('\r', '')
-        pdf.multi_cell(0, 10, txt=linea)
     return pdf.output(dest='S')
 
 # ------------------------------------------------------------
@@ -234,12 +244,20 @@ else:
     archivo = st.file_uploader("Sube tu archivo", type=["pdf", "png", "jpg", "jpeg"])
 
 # ------------------------------------------------------------
-# Lógica de traducción
+# Procesamiento
 # ------------------------------------------------------------
 if archivo and st.button("Traducir documento", type="primary"):
     with st.spinner("⏳ Extrayendo texto..."):
         if tipo_archivo == "PDF (texto digital)":
-            texto_bruto = extraer_texto_pdf(archivo)
+            if archivo.type == "application/pdf":
+                if not pdf_tiene_texto(archivo):
+                    st.warning("⚠️ Este PDF no contiene texto digital. Cambia a 'PDF escaneado o imagen'.")
+                    st.stop()
+                archivo.seek(0)
+                texto_bruto = extraer_texto_pdf(archivo)
+            else:
+                st.error("Extensión no soportada.")
+                st.stop()
         elif tipo_archivo == "PDF escaneado o imagen":
             if archivo.type == "application/pdf":
                 texto_bruto = extraer_texto_pdf_escaneado(archivo)
@@ -249,27 +267,37 @@ if archivo and st.button("Traducir documento", type="primary"):
             texto_bruto = extraer_texto_docx(archivo)
 
         if not texto_bruto.strip():
-            st.error("❌ No se pudo extraer texto. ¿El documento está vacío o la imagen es ilegible?")
+            st.error("❌ No se pudo extraer texto. El documento podría estar vacío o la imagen es ilegible.")
             st.stop()
         st.success(f"✅ Texto extraído ({len(texto_bruto)} caracteres).")
 
-    chunks = dividir_texto(texto_bruto, max_chars=6000)
+    chunks = dividir_texto(texto_bruto, max_chars=4000)
     st.info(f"📦 Documento dividido en {len(chunks)} fragmento(s).")
 
-    # Contexto: primeras 1000 letras del documento para orientar al modelo
-    contexto_global = texto_bruto[:1000]
+    contexto_global = texto_bruto[:300] if len(texto_bruto) > 300 else texto_bruto
 
     traducciones = []
     progreso = st.progress(0)
+
     for i, chunk in enumerate(chunks):
         with st.spinner(f"🌍 Traduciendo fragmento {i+1}/{len(chunks)}..."):
-            trad = traducir_chunk(chunk, idioma_origen, idioma_destino, contexto_global)
-            traducciones.append(trad)
-            progreso.progress((i + 1) / len(chunks))
-        time.sleep(1)  # respeto a la API gratuita
+            try:
+                if i == 0:
+                    trad = traducir_con_reintentos(chunk, idioma_origen, idioma_destino, contexto_global)
+                else:
+                    trad = traducir_con_reintentos(chunk, idioma_origen, idioma_destino)
+                traducciones.append(trad)
+            except (RateLimitError, APIError):
+                st.error("❌ La traducción falló después de varios intentos. Espera unos minutos y vuelve a intentarlo.")
+                st.stop()
+            except Exception as e:
+                st.error(f"Error inesperado: {e}")
+                st.stop()
+
+        progreso.progress((i + 1) / len(chunks))
+        time.sleep(3)  # pausa entre chunks para no saturar la API gratuita
 
     markdown_final = "\n\n".join(traducciones)
-
     st.success("🎉 ¡Traducción completada!")
 
     col1, col2 = st.columns(2)
