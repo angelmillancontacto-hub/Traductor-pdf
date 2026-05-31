@@ -1,5 +1,5 @@
 streamlit
 PyMuPDF
-groq
+google-generativeai
 pytesseract
 Pillow
