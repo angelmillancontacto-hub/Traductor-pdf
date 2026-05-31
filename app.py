@@ -1,5 +1,5 @@
 import streamlit as st
-import fitz
+import fitz  # PyMuPDF
 from docx import Document
 from fpdf import FPDF
 from pdf2image import convert_from_bytes
@@ -8,14 +8,14 @@ from PIL import Image
 import io
 import re
 import time
-import os
-from groq import Groq, RateLimitError, APIError
+import google.generativeai as genai
 
 # ------------------------------------------------------------
 # Configuración de la página
 # ------------------------------------------------------------
 st.set_page_config(page_title="Traductor de documentos", layout="wide")
 
+# Botones de descarga más llamativos
 st.markdown("""
 <style>
     .stDownloadButton button {
@@ -40,10 +40,10 @@ st.title("🌐 Traductor de documentos a cualquier idioma")
 st.markdown("Sube un PDF, imagen o Word y obtén una traducción **natural y con formato**.")
 
 # ------------------------------------------------------------
-# Cliente de Groq
+# Cliente de Gemini (100% gratuito)
 # ------------------------------------------------------------
-client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-MODELO = "llama-3.3-70b-versatile"
+genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+modelo = genai.GenerativeModel('gemini-2.0-flash')
 
 # ------------------------------------------------------------
 # Idiomas
@@ -93,9 +93,9 @@ def pdf_tiene_texto(pdf_file):
     return tiene
 
 # ------------------------------------------------------------
-# División en chunks (para luego agrupar en lotes)
+# División en chunks (más grandes, para reducir peticiones)
 # ------------------------------------------------------------
-def dividir_texto(texto, max_chars=4000):
+def dividir_texto(texto, max_chars=6000):
     parrafos = texto.split('\n')
     chunks = []
     actual = ""
@@ -116,45 +116,47 @@ def dividir_texto(texto, max_chars=4000):
     return chunks
 
 # ------------------------------------------------------------
-# Traducción de un lote (varios chunks unidos)
+# Traducción con Gemini (contexto solo en el primer chunk)
 # ------------------------------------------------------------
-def traducir_lote(texto_lote, idioma_origen, idioma_destino, contexto):
+def traducir_chunk(texto, idioma_origen, idioma_destino, contexto=""):
     origen_str = "el idioma detectado automáticamente" if idioma_origen == "auto" else idioma_origen
 
-    prompt = f"""Eres un traductor profesional. Vas a recibir un texto dividido en varias secciones separadas por la línea '---SECCIÓN---'. Traduce cada sección del {origen_str} al {idioma_destino} de manera **natural y fluida**, conservando **exactamente** el formato Markdown original (títulos, listas, negritas, cursivas, enlaces). Devuelve las secciones traducidas en el mismo orden, separadas por la misma línea '---SECCIÓN---'. No omitas ningún contenido.
+    if contexto:
+        prompt = f"""Eres un traductor profesional. Traduce el siguiente fragmento del {origen_str} al {idioma_destino} de manera **natural y fluida**. Conserva **exactamente** el formato Markdown original (títulos, listas, negritas, cursivas, enlaces). No omitas ningún contenido.
 Contexto general del documento: {contexto}
 
-Texto a traducir:
-{texto_lote}"""
+Texto original:
+{texto}"""
+    else:
+        prompt = f"""Eres un traductor profesional. Traduce el siguiente fragmento del {origen_str} al {idioma_destino} de manera **natural y fluida**. Conserva **exactamente** el formato Markdown original (títulos, listas, negritas, cursivas, enlaces). No omitas ningún contenido.
 
-    respuesta = client.chat.completions.create(
-        model=MODELO,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-    )
-    return respuesta.choices[0].message.content
+Texto original:
+{texto}"""
+
+    respuesta = modelo.generate_content(prompt)
+    return respuesta.text
 
 # ------------------------------------------------------------
-# Reintento manual para rate limits
+# Reintento manual por si hay un error puntual de límite
 # ------------------------------------------------------------
-def traducir_con_reintentos(texto_lote, idioma_origen, idioma_destino, contexto):
+def traducir_con_reintentos(chunk, idioma_origen, idioma_destino, contexto=""):
     max_intentos = 3
-    esperas = [20, 40, 60]  # segundos
+    esperas = [10, 30, 60]
     for intento in range(max_intentos):
         try:
-            return traducir_lote(texto_lote, idioma_origen, idioma_destino, contexto)
-        except RateLimitError:
-            if intento < max_intentos - 1:
-                st.warning(f"⚠️ Límite de tokens alcanzado. Esperando {esperas[intento]}s... (intento {intento+1}/{max_intentos})")
-                time.sleep(esperas[intento])
+            return traducir_chunk(chunk, idioma_origen, idioma_destino, contexto)
+        except Exception as e:
+            if "ResourceExhausted" in str(e) or "429" in str(e):
+                if intento < max_intentos - 1:
+                    st.warning(f"⏳ Límite de peticiones. Esperando {esperas[intento]}s... (intento {intento+1}/{max_intentos})")
+                    time.sleep(esperas[intento])
+                else:
+                    raise
             else:
                 raise
-        except APIError as e:
-            st.error(f"Error de la API de Groq: {e}")
-            raise
 
 # ------------------------------------------------------------
-# Creación de Word
+# Creación de Word (soporta negritas/cursivas)
 # ------------------------------------------------------------
 def aplicar_formato(paragraph, texto):
     partes = re.split(r'(\*\*.*?\*\*|\*.*?\*)', texto)
@@ -193,7 +195,7 @@ def crear_docx_desde_markdown(markdown):
     return buffer
 
 # ------------------------------------------------------------
-# Creación de PDF (solo Helvetica para evitar fuentes externas)
+# Creación de PDF (sin fuentes externas, solo Helvetica)
 # ------------------------------------------------------------
 def crear_pdf_desde_markdown(markdown):
     pdf = FPDF()
@@ -219,7 +221,7 @@ with col2:
     idioma_destino_key = st.selectbox(
         "Idioma de destino",
         [k for k in IDIOMAS.keys() if k != "Auto (detección automática)"],
-        index=0
+        index=0  # Español
     )
 
 idioma_origen = IDIOMAS[idioma_origen_key]
@@ -264,49 +266,31 @@ if archivo and st.button("Traducir documento", type="primary"):
             st.stop()
         st.success(f"✅ Texto extraído ({len(texto_bruto)} caracteres).")
 
-    # --- Dividir y agrupar en lotes ---
-    chunks = dividir_texto(texto_bruto, max_chars=4000)
-    st.info(f"📦 Documento dividido en {len(chunks)} fragmentos. Agrupando en lotes...")
-
-    # Crear lotes de hasta 12000 caracteres (para no superar TPM)
-    lote_textos = []
-    lote_actual = ""
-    for chunk in chunks:
-        if len(lote_actual) + len(chunk) < 12000:
-            lote_actual += chunk + "\n\n---SECCIÓN---\n\n"
-        else:
-            lote_actual += chunk + "\n\n---SECCIÓN---\n\n"
-            lote_textos.append(lote_actual.rstrip("\n\n---SECCIÓN---\n\n"))
-            lote_actual = ""
-    if lote_actual.strip():
-        lote_textos.append(lote_actual.rstrip("\n\n---SECCIÓN---\n\n"))
-
-    st.success(f"📚 Se generaron {len(lote_textos)} lote(s) para traducir.")
+    # --- Dividir y traducir con pausa ---
+    chunks = dividir_texto(texto_bruto, max_chars=6000)
+    st.info(f"📦 Documento dividido en {len(chunks)} fragmento(s).")
 
     contexto_global = texto_bruto[:300] if len(texto_bruto) > 300 else texto_bruto
-    traducciones_lotes = []
+
+    traducciones = []
     progreso = st.progress(0)
 
-    for i, lote in enumerate(lote_textos):
-        with st.spinner(f"🌍 Traduciendo lote {i+1}/{len(lote_textos)}..."):
+    for i, chunk in enumerate(chunks):
+        with st.spinner(f"🌍 Traduciendo fragmento {i+1}/{len(chunks)}..."):
             try:
-                resultado = traducir_con_reintentos(lote, idioma_origen, idioma_destino, contexto_global)
-                # El resultado contiene las secciones separadas por '---SECCIÓN---'
-                partes = resultado.split("---SECCIÓN---")
-                for p in partes:
-                    traducciones_lotes.append(p.strip())
-            except (RateLimitError, APIError):
-                st.error("❌ La traducción falló después de varios intentos. Espera unos minutos y vuelve a intentarlo.")
-                st.stop()
+                if i == 0:
+                    trad = traducir_con_reintentos(chunk, idioma_origen, idioma_destino, contexto_global)
+                else:
+                    trad = traducir_con_reintentos(chunk, idioma_origen, idioma_destino)
+                traducciones.append(trad)
             except Exception as e:
-                st.error(f"Error inesperado: {e}")
+                st.error(f"❌ Error al traducir: {str(e)[:200]}")
                 st.stop()
-        progreso.progress((i + 1) / len(lote_textos))
-        # Pausa entre lotes para no exceder TPM (7.000 tokens/minuto)
-        time.sleep(20)
+        progreso.progress((i + 1) / len(chunks))
+        # Pausa para respetar las 15 RPM (1 petición cada 4 segundos es seguro, usamos 5)
+        time.sleep(5)
 
-    # Unir todas las traducciones en orden
-    markdown_final = "\n\n".join(traducciones_lotes)
+    markdown_final = "\n\n".join(traducciones)
     st.success("🎉 ¡Traducción completada!")
 
     col1, col2 = st.columns(2)
