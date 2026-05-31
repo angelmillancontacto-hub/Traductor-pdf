@@ -169,32 +169,18 @@ def aplicar_formato(paragraph, texto):
         else:
             paragraph.add_run(parte)
 
-def crear_docx_desde_markdown(markdown):
-    doc = Document()
+def crear_pdf_desde_markdown(markdown):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=12)
     for linea in markdown.split('\n'):
-        linea = linea.strip()
-        if not linea:
-            doc.add_paragraph('')
-            continue
-        if linea.startswith('#'):
-            nivel = len(re.match(r'^#+', linea).group())
-            doc.add_heading(linea.lstrip('#').strip(), level=min(nivel, 9))
-        elif linea.startswith('- ') or linea.startswith('* '):
-            p = doc.add_paragraph(style='List Bullet')
-            aplicar_formato(p, linea[2:])
-        elif re.match(r'^\d+\.\s', linea):
-            p = doc.add_paragraph(style='List Number')
-            aplicar_formato(p, re.sub(r'^\d+\.\s', '', linea))
-        else:
-            p = doc.add_paragraph()
-            aplicar_formato(p, linea)
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer
+        # Reemplazar caracteres no soportados por latin-1
+        linea_limpia = linea.encode('latin-1', 'replace').decode('latin-1')
+        pdf.multi_cell(0, 10, txt=linea_limpia)
+    return pdf.output(dest='S')
 
 # ------------------------------------------------------------
-# Creación de PDF con fuente Unicode (DejaVu)
+# Creación de PDF con fuente latin
 # ------------------------------------------------------------
 def crear_pdf_desde_markdown(markdown):
     pdf = FPDF()
