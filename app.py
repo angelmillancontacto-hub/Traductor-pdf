@@ -2,6 +2,57 @@ import streamlit as st
 import fitz  
 import google.generativeai as genai
 import json
+from docx import Document # Nueva librería para generar Word
+
+# Configuración de Gemini
+genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+modelo = genai.GenerativeModel('gemini-2.0-flash')
+
+def extraer_texto_fluido(pdf_file):
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+    texto_completo = ""
+    for pagina in doc:
+        texto_completo += pagina.get_text() + "\n"
+    return texto_completo
+
+def generar_documento(markdown_content, nombre_archivo):
+    # Aquí crearías el PDF o Word a partir del Markdown
+    # Ejemplo rápido para Word:
+    doc = Document()
+    doc.add_paragraph(markdown_content)
+    doc.save(f"{nombre_archivo}.docx")
+    return f"{nombre_archivo}.docx"
+
+# Interfaz
+st.title("🚀 Reconstructor de Documentos")
+archivo = st.file_uploader("Sube el PDF", type="pdf")
+
+if archivo and st.button("Reconstruir y Traducir"):
+    # 1. Extracción
+    texto_bruto = extraer_texto_fluido(archivo)
+    
+    # 2. IA como Diseñador Editorial
+    prompt = f"""
+    Actúa como un diseñador editorial experto.
+    Traduce el siguiente texto de {idioma_origen} a {idioma_destino}.
+    Devuélveme el resultado exclusivamente en formato Markdown estructurado:
+    - Usa # para Títulos, ## para Subtítulos.
+    - Usa - para listas.
+    - Usa > para citas importantes.
+    - Mantén el orden lógico del contenido.
+    TEXTO: {texto_bruto}
+    """
+    
+    response = modelo.generate_content(prompt)
+    markdown_final = response.text
+    
+    # 3. Guardado
+    archivo_word = generar_documento(markdown_final, "documento_reconstruido")
+    st.success("¡Documento reconstruido con éxito!")
+    st.download_button("Descargar Word", data=open(archivo_word, "rb"), file_name="resultado.docx")import streamlit as st
+import fitz  
+import google.generativeai as genai
+import json
 import time
 import pytesseract
 from PIL import Image
