@@ -1,7 +1,7 @@
 import streamlit as st
 import fitz  # PyMuPDF
 from docx import Document
-from fpdf import FPDF
+from fpdf import FPDF  # ahora es fpdf2 (Unicode)
 from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image
@@ -15,14 +15,40 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 # Configuración de la página
 # ------------------------------------------------------------
 st.set_page_config(page_title="Traductor de documentos", layout="wide")
+
+# CSS personalizado para botones más llamativos
+st.markdown("""
+<style>
+    .stDownloadButton button {
+        font-size: 18px !important;
+        font-weight: bold !important;
+        background-color: #FF4B4B !important;
+        color: white !important;
+        padding: 0.75em 2em !important;
+        border-radius: 12px !important;
+        border: none !important;
+        box-shadow: 2px 2px 10px rgba(0,0,0,0.2);
+        transition: transform 0.2s;
+    }
+    .stDownloadButton button:hover {
+        background-color: #e04343 !important;
+        transform: scale(1.05);
+    }
+    /* Ocultar la vista previa del markdown accidental */
+    .element-container:has(.stMarkdown) + .stDownloadButton {
+        margin-top: 1rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 st.title("🌐 Traductor de documentos a cualquier idioma")
-st.markdown("Sube un PDF, imagen o Word y tradúcelo conservando el formato.")
+st.markdown("Sube un PDF, imagen o Word y obtén una traducción **natural y con formato**.")
 
 # ------------------------------------------------------------
 # Cliente de Groq (100 % gratuito)
 # ------------------------------------------------------------
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-MODELO = "llama-3.3-70b-versatile"   # modelo gratuito y excelente para traducción
+MODELO = "llama-3.3-70b-versatile"
 
 # ------------------------------------------------------------
 # Diccionario de idiomas para los selectores
@@ -47,7 +73,7 @@ IDIOMAS = {
 # Funciones de extracción de texto
 # ------------------------------------------------------------
 def extraer_texto_pdf(pdf_file):
-    """Extrae texto de un PDF con capa de texto digital (no escaneado)."""
+    """Extrae texto de un PDF con capa de texto digital."""
     doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
     texto = "\n".join([pagina.get_text() for pagina in doc])
     return texto
@@ -71,10 +97,10 @@ def extraer_texto_docx(docx_file):
     return "\n".join([para.text for para in doc.paragraphs])
 
 # ------------------------------------------------------------
-# División del texto en trozos
+# División del texto en trozos (más grandes, menos peticiones)
 # ------------------------------------------------------------
 def dividir_texto(texto, max_chars=6000):
-    """Divide el texto en fragmentos sin cortar palabras (máximo 6000 caracteres por trozo)."""
+    """Divide el texto en fragmentos sin cortar palabras."""
     parrafos = texto.split('\n')
     chunks = []
     chunk_actual = ""
@@ -90,73 +116,65 @@ def dividir_texto(texto, max_chars=6000):
     return chunks
 
 # ------------------------------------------------------------
-# Traducción con Groq (reintentos automáticos por si acaso)
+# Traducción con Groq (prompt mejorado para naturalidad)
 # ------------------------------------------------------------
 @retry(
-    retry=retry_if_exception_type(Exception),  # captura cualquier error de red o API
+    retry=retry_if_exception_type(Exception),
     wait=wait_exponential(multiplier=2, min=2, max=30),
     stop=stop_after_attempt(3)
 )
 def traducir_chunk(texto, idioma_origen, idioma_destino):
-    """Traduce un fragmento y devuelve el texto en formato Markdown."""
-    # Construir prompt
-    if idioma_origen == "auto":
-        origen_str = "el idioma detectado automáticamente"
-    else:
-        origen_str = idioma_origen
+    """Traduce un fragmento con análisis de contexto y estilo."""
+    origen_str = "el idioma detectado automáticamente" if idioma_origen == "auto" else idioma_origen
 
-    prompt = f"""Traduce el siguiente texto del {origen_str} al {idioma_destino}.
-Devuelve ÚNICAMENTE la traducción en formato Markdown, conservando títulos, listas, negritas, itálicas, enlaces y cualquier otra estructura.
-No añadas ningún comentario ni nota.
-Texto:
+    prompt = f"""Eres un traductor profesional. Antes de traducir, analiza brevemente el tono, estilo y propósito del texto original (formal, técnico, coloquial, etc.). Luego, traduce el siguiente texto del {origen_str} al {idioma_destino} de manera **natural y fluida**, como si hubiera sido escrito originalmente en {idioma_destino}. Conserva el formato Markdown: títulos, listas, negritas, itálicas, enlaces. No añadas explicaciones ni notas, solo la traducción final.
+
+Texto original:
 {texto}"""
 
     respuesta = client.chat.completions.create(
         model=MODELO,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,  # favorece la precisión
+        temperature=0.3,  # un poco más de creatividad para naturalidad
     )
     return respuesta.choices[0].message.content
 
 # ------------------------------------------------------------
-# Creación de archivos de salida (Word y PDF desde Markdown)
+# Creación de Word mejorada (desde Markdown)
 # ------------------------------------------------------------
 def crear_docx_desde_markdown(markdown):
-    """Crea un archivo .docx interpretando el Markdown básico."""
+    """Genera un .docx interpretando Markdown (títulos, listas, párrafos)."""
     doc = Document()
     for linea in markdown.split('\n'):
         linea = linea.strip()
         if not linea:
             doc.add_paragraph('')
             continue
-        # Títulos
         if linea.startswith('#'):
             nivel = len(re.match(r'^#+', linea).group())
-            texto = linea.lstrip('#').strip()
-            doc.add_heading(texto, level=min(nivel, 9))
-        # Listas no ordenadas
+            doc.add_heading(linea.lstrip('#').strip(), level=min(nivel, 9))
         elif linea.startswith('- ') or linea.startswith('* '):
             doc.add_paragraph(linea[2:], style='List Bullet')
-        # Listas ordenadas (simples)
         elif re.match(r'^\d+\.\s', linea):
             doc.add_paragraph(linea, style='List Number')
         else:
-            # Aquí se podría procesar Markdown inline, pero lo dejamos como texto
             doc.add_paragraph(linea)
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer
 
+# ------------------------------------------------------------
+# Creación de PDF con soporte Unicode (fpdf2)
+# ------------------------------------------------------------
 def crear_pdf_desde_markdown(markdown):
-    """Crea un PDF simple a partir de Markdown (solo texto, sin formato rico)."""
+    """Crea un PDF con texto Unicode (sin límite de latin-1)."""
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", size=12)
+    pdf.add_font("NotoSans", "", "NotoSans-Regular.ttf", uni=True)  # fuente incluida en fpdf2
+    pdf.set_font("NotoSans", size=12)
     for linea in markdown.split('\n'):
-        # Reemplazar caracteres no Latin-1 para evitar errores (puedes usar fuentes TTF para Unicode)
-        linea_limpia = linea.encode('latin-1', 'replace').decode('latin-1')
-        pdf.multi_cell(0, 10, txt=linea_limpia)
+        pdf.multi_cell(0, 10, txt=linea)
     return pdf.output(dest='S')
 
 # ------------------------------------------------------------
@@ -174,7 +192,7 @@ with col2:
     idioma_destino_key = st.selectbox(
         "Idioma de destino",
         [k for k in IDIOMAS.keys() if k != "Auto (detección automática)"],
-        index=0  # Español por defecto
+        index=0  # Español
     )
 
 idioma_origen = IDIOMAS[idioma_origen_key]
@@ -196,7 +214,7 @@ else:
 # ------------------------------------------------------------
 if archivo and st.button("Traducir documento", type="primary"):
     with st.spinner("⏳ Extrayendo texto..."):
-        # 1. Extraer el texto según el tipo de archivo
+        # 1. Extraer el texto según el tipo
         if tipo_archivo == "PDF (texto digital)":
             texto_bruto = extraer_texto_pdf(archivo)
         elif tipo_archivo == "PDF escaneado o imagen":
@@ -211,11 +229,11 @@ if archivo and st.button("Traducir documento", type="primary"):
             st.error("❌ No se pudo extraer texto. ¿El documento está vacío o la imagen es ilegible?")
             st.stop()
 
-        st.success(f"✅ Texto extraído ({len(texto_bruto)} caracteres). Dividiendo en fragmentos...")
+        st.success(f"✅ Texto extraído ({len(texto_bruto)} caracteres). Preparando traducción...")
 
     # 2. Dividir en trozos
     chunks = dividir_texto(texto_bruto, max_chars=6000)
-    st.info(f"📦 El documento se ha dividido en {len(chunks)} fragmento(s) para su traducción.")
+    st.info(f"📦 El documento se ha dividido en {len(chunks)} fragmento(s).")
 
     # 3. Traducir cada trozo con barra de progreso
     traducciones = []
@@ -225,23 +243,19 @@ if archivo and st.button("Traducir documento", type="primary"):
             trad = traducir_chunk(chunk, idioma_origen, idioma_destino)
             traducciones.append(trad)
             progreso.progress((i + 1) / len(chunks))
-        # Pequeña pausa para no saturar la API (aunque Groq es muy generoso, 1 s es prudente)
-        time.sleep(1)
+        time.sleep(1)  # pausa mínima para respetar la API
 
     # 4. Unir las traducciones
     markdown_final = "\n\n".join(traducciones)
 
-    # 5. Mostrar resultado
+    # 5. Sin vista previa – solo mensaje y botones de descarga
     st.success("🎉 ¡Traducción completada!")
-    st.markdown("### Vista previa de la traducción")
-    st.markdown(markdown_final)
 
-    # 6. Botones de descarga
     col1, col2 = st.columns(2)
     with col1:
         docx_bytes = crear_docx_desde_markdown(markdown_final)
         st.download_button(
-            label="⬇️ Descargar Word",
+            label="⬇️ DESCARGAR WORD",
             data=docx_bytes,
             file_name="traduccion.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -249,7 +263,7 @@ if archivo and st.button("Traducir documento", type="primary"):
     with col2:
         pdf_bytes = crear_pdf_desde_markdown(markdown_final)
         st.download_button(
-            label="⬇️ Descargar PDF",
+            label="⬇️ DESCARGAR PDF",
             data=pdf_bytes,
             file_name="traduccion.pdf",
             mime="application/pdf"
