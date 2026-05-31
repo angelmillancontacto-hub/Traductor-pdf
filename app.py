@@ -1,5 +1,5 @@
 import streamlit as st
-import fitz  # PyMuPDF
+import fitz
 from docx import Document
 from fpdf import FPDF
 from pdf2image import convert_from_bytes
@@ -15,7 +15,7 @@ import google.generativeai as genai
 # ------------------------------------------------------------
 st.set_page_config(page_title="Traductor de documentos", layout="wide")
 
-# Botones de descarga más llamativos
+# Botones de descarga más vistosos
 st.markdown("""
 <style>
     .stDownloadButton button {
@@ -40,7 +40,7 @@ st.title("🌐 Traductor de documentos a cualquier idioma")
 st.markdown("Sube un PDF, imagen o Word y obtén una traducción **natural y con formato**.")
 
 # ------------------------------------------------------------
-# Cliente de Gemini (100% gratuito)
+# Cliente de Gemini (gratuito)
 # ------------------------------------------------------------
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 modelo = genai.GenerativeModel('gemini-2.0-flash')
@@ -93,9 +93,9 @@ def pdf_tiene_texto(pdf_file):
     return tiene
 
 # ------------------------------------------------------------
-# División en chunks (más grandes, para reducir peticiones)
+# División en chunks grandes (10 000 caracteres)
 # ------------------------------------------------------------
-def dividir_texto(texto, max_chars=6000):
+def dividir_texto(texto, max_chars=10000):
     parrafos = texto.split('\n')
     chunks = []
     actual = ""
@@ -116,7 +116,7 @@ def dividir_texto(texto, max_chars=6000):
     return chunks
 
 # ------------------------------------------------------------
-# Traducción con Gemini (contexto solo en el primer chunk)
+# Traducción con Gemini (contexto solo primer chunk)
 # ------------------------------------------------------------
 def traducir_chunk(texto, idioma_origen, idioma_destino, contexto=""):
     origen_str = "el idioma detectado automáticamente" if idioma_origen == "auto" else idioma_origen
@@ -137,26 +137,31 @@ Texto original:
     return respuesta.text
 
 # ------------------------------------------------------------
-# Reintento manual por si hay un error puntual de límite
+# Reintentos manuales (solo para rate limit, no para cuota diaria)
 # ------------------------------------------------------------
 def traducir_con_reintentos(chunk, idioma_origen, idioma_destino, contexto=""):
-    max_intentos = 3
-    esperas = [10, 30, 60]
+    max_intentos = 2
     for intento in range(max_intentos):
         try:
             return traducir_chunk(chunk, idioma_origen, idioma_destino, contexto)
         except Exception as e:
-            if "ResourceExhausted" in str(e) or "429" in str(e):
+            error_msg = str(e)
+            # Si es error de cuota diaria, no reintentamos (no servirá)
+            if "exceeded your current quota" in error_msg or "429" in error_msg:
+                st.error("❌ Has alcanzado el límite diario de peticiones de Gemini. Vuelve a intentarlo mañana o reduce el tamaño del documento.")
+                st.stop()
+            elif "ResourceExhausted" in error_msg:
+                # Rate limit por RPM, reintentamos
                 if intento < max_intentos - 1:
-                    st.warning(f"⏳ Límite de peticiones. Esperando {esperas[intento]}s... (intento {intento+1}/{max_intentos})")
-                    time.sleep(esperas[intento])
+                    st.warning(f"⏳ Límite de peticiones por minuto. Esperando 20 segundos...")
+                    time.sleep(20)
                 else:
                     raise
             else:
                 raise
 
 # ------------------------------------------------------------
-# Creación de Word (soporta negritas/cursivas)
+# Creación de Word (con negritas/cursivas)
 # ------------------------------------------------------------
 def aplicar_formato(paragraph, texto):
     partes = re.split(r'(\*\*.*?\*\*|\*.*?\*)', texto)
@@ -195,7 +200,7 @@ def crear_docx_desde_markdown(markdown):
     return buffer
 
 # ------------------------------------------------------------
-# Creación de PDF (sin fuentes externas, solo Helvetica)
+# PDF con Helvetica (sin fuentes externas)
 # ------------------------------------------------------------
 def crear_pdf_desde_markdown(markdown):
     pdf = FPDF()
@@ -221,7 +226,7 @@ with col2:
     idioma_destino_key = st.selectbox(
         "Idioma de destino",
         [k for k in IDIOMAS.keys() if k != "Auto (detección automática)"],
-        index=0  # Español
+        index=0
     )
 
 idioma_origen = IDIOMAS[idioma_origen_key]
@@ -266,12 +271,15 @@ if archivo and st.button("Traducir documento", type="primary"):
             st.stop()
         st.success(f"✅ Texto extraído ({len(texto_bruto)} caracteres).")
 
-    # --- Dividir y traducir con pausa ---
-    chunks = dividir_texto(texto_bruto, max_chars=6000)
+    # Dividir en chunks grandes
+    chunks = dividir_texto(texto_bruto, max_chars=10000)
     st.info(f"📦 Documento dividido en {len(chunks)} fragmento(s).")
 
-    contexto_global = texto_bruto[:300] if len(texto_bruto) > 300 else texto_bruto
+    # Mostrar advertencia si el número de peticiones es alto
+    if len(chunks) > 100:
+        st.warning("⚠️ El documento es muy extenso y puede consumir gran parte de tu cuota diaria. Considera dividirlo en partes.")
 
+    contexto_global = texto_bruto[:300] if len(texto_bruto) > 300 else texto_bruto
     traducciones = []
     progreso = st.progress(0)
 
@@ -284,11 +292,11 @@ if archivo and st.button("Traducir documento", type="primary"):
                     trad = traducir_con_reintentos(chunk, idioma_origen, idioma_destino)
                 traducciones.append(trad)
             except Exception as e:
-                st.error(f"❌ Error al traducir: {str(e)[:200]}")
+                st.error(f"❌ Error inesperado al traducir: {str(e)[:200]}")
                 st.stop()
         progreso.progress((i + 1) / len(chunks))
-        # Pausa para respetar las 15 RPM (1 petición cada 4 segundos es seguro, usamos 5)
-        time.sleep(5)
+        # Pausa de 8 segundos para garantizar < 8 RPM (muy por debajo de las 15)
+        time.sleep(8)
 
     markdown_final = "\n\n".join(traducciones)
     st.success("🎉 ¡Traducción completada!")
