@@ -1,8 +1,8 @@
 streamlit
 pymupdf
-google-generativeai
 python-docx
-reportlab
+fpdf
 pdf2image
 pytesseract
 Pillow
+deepl
