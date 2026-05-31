@@ -5,4 +5,5 @@ fpdf
 pdf2image
 pytesseract
 Pillow
-deepl
+groq
+tenacity
