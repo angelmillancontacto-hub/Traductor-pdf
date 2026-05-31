@@ -1,6 +1,5 @@
 import streamlit as st
 import fitz  # PyMuPDF
-import google.generativeai as genai
 from docx import Document
 from fpdf import FPDF
 from pdf2image import convert_from_bytes
@@ -8,49 +7,74 @@ import pytesseract
 from PIL import Image
 import io
 import re
+import time
+from groq import Groq
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-# ------------------------------
-# Configuración inicial
-# ------------------------------
+# ------------------------------------------------------------
+# Configuración de la página
+# ------------------------------------------------------------
 st.set_page_config(page_title="Traductor de documentos", layout="wide")
 st.title("🌐 Traductor de documentos a cualquier idioma")
+st.markdown("Sube un PDF, imagen o Word y tradúcelo conservando el formato.")
 
-# Conectar con Gemini
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-modelo = genai.GenerativeModel('gemini-2.0-flash')
+# ------------------------------------------------------------
+# Cliente de Groq (100 % gratuito)
+# ------------------------------------------------------------
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+MODELO = "llama-3.3-70b-versatile"   # modelo gratuito y excelente para traducción
 
-# Si usas Windows local, tal vez necesites indicar la ruta de Tesseract:
-# pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-# En Streamlit Cloud no hace falta.
+# ------------------------------------------------------------
+# Diccionario de idiomas para los selectores
+# ------------------------------------------------------------
+IDIOMAS = {
+    "Español": "Spanish",
+    "Inglés": "English",
+    "Francés": "French",
+    "Alemán": "German",
+    "Portugués": "Portuguese",
+    "Italiano": "Italian",
+    "Neerlandés": "Dutch",
+    "Ruso": "Russian",
+    "Chino (simplificado)": "Chinese (simplified)",
+    "Japonés": "Japanese",
+    "Coreano": "Korean",
+    "Árabe": "Arabic",
+    "Auto (detección automática)": "auto"
+}
 
-# ------------------------------
-# Funciones auxiliares
-# ------------------------------
+# ------------------------------------------------------------
+# Funciones de extracción de texto
+# ------------------------------------------------------------
 def extraer_texto_pdf(pdf_file):
-    """Extrae texto de un PDF (solo PDFs con texto digital, no escaneados)"""
+    """Extrae texto de un PDF con capa de texto digital (no escaneado)."""
     doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
     texto = "\n".join([pagina.get_text() for pagina in doc])
     return texto
 
-def extraer_texto_imagen(imagen):
-    """Aplica OCR a una imagen PIL y devuelve el texto"""
-    return pytesseract.image_to_string(imagen, lang='spa+eng')  # puede detectar español e inglés
-
 def extraer_texto_pdf_escaneado(pdf_file):
-    """Convierte PDF a imágenes y aplica OCR a cada página"""
+    """Convierte PDF a imágenes y aplica OCR a cada página."""
     imagenes = convert_from_bytes(pdf_file.read())
     texto = ""
     for img in imagenes:
         texto += pytesseract.image_to_string(img, lang='spa+eng') + "\n"
     return texto
 
+def extraer_texto_imagen(imagen_file):
+    """Aplica OCR a una imagen (PNG, JPG...)."""
+    img = Image.open(imagen_file)
+    return pytesseract.image_to_string(img, lang='spa+eng')
+
 def extraer_texto_docx(docx_file):
-    """Extrae texto de un archivo .docx"""
+    """Extrae texto de un archivo .docx."""
     doc = Document(docx_file)
     return "\n".join([para.text for para in doc.paragraphs])
 
-def dividir_texto(texto, max_chars=3000):
-    """Divide el texto en fragmentos sin cortar palabras, por párrafos"""
+# ------------------------------------------------------------
+# División del texto en trozos
+# ------------------------------------------------------------
+def dividir_texto(texto, max_chars=6000):
+    """Divide el texto en fragmentos sin cortar palabras (máximo 6000 caracteres por trozo)."""
     parrafos = texto.split('\n')
     chunks = []
     chunk_actual = ""
@@ -58,37 +82,66 @@ def dividir_texto(texto, max_chars=3000):
         if len(chunk_actual) + len(p) < max_chars:
             chunk_actual += p + "\n"
         else:
-            chunks.append(chunk_actual.strip())
+            if chunk_actual.strip():
+                chunks.append(chunk_actual.strip())
             chunk_actual = p + "\n"
-    if chunk_actual:
+    if chunk_actual.strip():
         chunks.append(chunk_actual.strip())
     return chunks
 
+# ------------------------------------------------------------
+# Traducción con Groq (reintentos automáticos por si acaso)
+# ------------------------------------------------------------
+@retry(
+    retry=retry_if_exception_type(Exception),  # captura cualquier error de red o API
+    wait=wait_exponential(multiplier=2, min=2, max=30),
+    stop=stop_after_attempt(3)
+)
 def traducir_chunk(texto, idioma_origen, idioma_destino):
-    """Traduce un fragmento con Gemini y devuelve el Markdown"""
-    prompt = f"""Traduce el siguiente texto del {idioma_origen} al {idioma_destino}.
-Devuelve ÚNICAMENTE la traducción en formato Markdown, conservando títulos, listas, negritas y estructura.
-No añadas comentarios.
+    """Traduce un fragmento y devuelve el texto en formato Markdown."""
+    # Construir prompt
+    if idioma_origen == "auto":
+        origen_str = "el idioma detectado automáticamente"
+    else:
+        origen_str = idioma_origen
+
+    prompt = f"""Traduce el siguiente texto del {origen_str} al {idioma_destino}.
+Devuelve ÚNICAMENTE la traducción en formato Markdown, conservando títulos, listas, negritas, itálicas, enlaces y cualquier otra estructura.
+No añadas ningún comentario ni nota.
 Texto:
 {texto}"""
-    respuesta = modelo.generate_content(prompt)
-    return respuesta.text
 
+    respuesta = client.chat.completions.create(
+        model=MODELO,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,  # favorece la precisión
+    )
+    return respuesta.choices[0].message.content
+
+# ------------------------------------------------------------
+# Creación de archivos de salida (Word y PDF desde Markdown)
+# ------------------------------------------------------------
 def crear_docx_desde_markdown(markdown):
-    """Crea un archivo .docx a partir de un texto en Markdown (estilos simples)"""
+    """Crea un archivo .docx interpretando el Markdown básico."""
     doc = Document()
     for linea in markdown.split('\n'):
         linea = linea.strip()
+        if not linea:
+            doc.add_paragraph('')
+            continue
+        # Títulos
         if linea.startswith('#'):
-            # Contar cuántos # para el nivel de título
             nivel = len(re.match(r'^#+', linea).group())
-            doc.add_heading(linea.lstrip('#').strip(), level=min(nivel, 9))
+            texto = linea.lstrip('#').strip()
+            doc.add_heading(texto, level=min(nivel, 9))
+        # Listas no ordenadas
         elif linea.startswith('- ') or linea.startswith('* '):
             doc.add_paragraph(linea[2:], style='List Bullet')
-        elif linea == '':
-            doc.add_paragraph('')
+        # Listas ordenadas (simples)
+        elif re.match(r'^\d+\.\s', linea):
+            doc.add_paragraph(linea, style='List Number')
         else:
-            # Podrías detectar negritas con **texto** y aplicar estilo, pero por ahora texto simple
+            # Aquí se podría procesar Markdown inline, pero lo dejamos como texto
             doc.add_paragraph(linea)
     buffer = io.BytesIO()
     doc.save(buffer)
@@ -96,70 +149,108 @@ def crear_docx_desde_markdown(markdown):
     return buffer
 
 def crear_pdf_desde_markdown(markdown):
-    """Crea un PDF simple desde Markdown (mejorable)"""
+    """Crea un PDF simple a partir de Markdown (solo texto, sin formato rico)."""
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
     for linea in markdown.split('\n'):
-        # Reemplazar caracteres no soportados por latin-1
+        # Reemplazar caracteres no Latin-1 para evitar errores (puedes usar fuentes TTF para Unicode)
         linea_limpia = linea.encode('latin-1', 'replace').decode('latin-1')
-        pdf.cell(200, 10, txt=linea_limpia, ln=True)
+        pdf.multi_cell(0, 10, txt=linea_limpia)
     return pdf.output(dest='S')
 
-# ------------------------------
+# ------------------------------------------------------------
 # Interfaz de usuario
-# ------------------------------
+# ------------------------------------------------------------
 st.sidebar.header("⚙️ Configuración de idiomas")
-idioma_origen = st.sidebar.text_input("Idioma de origen (ej. English, French, Chinese, auto)", value="auto")
-idioma_destino = st.sidebar.text_input("Idioma de destino", value="Spanish")
-st.sidebar.info("Puedes escribir 'auto' para que la IA detecte el idioma de origen automáticamente.")
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    idioma_origen_key = st.selectbox(
+        "Idioma de origen",
+        list(IDIOMAS.keys()),
+        index=list(IDIOMAS.keys()).index("Auto (detección automática)")
+    )
+with col2:
+    idioma_destino_key = st.selectbox(
+        "Idioma de destino",
+        [k for k in IDIOMAS.keys() if k != "Auto (detección automática)"],
+        index=0  # Español por defecto
+    )
 
-tipo_archivo = st.radio("Tipo de documento a subir:",
-                        ("PDF (texto digital)", "PDF escaneado o imagen", "Word (.docx)"))
+idioma_origen = IDIOMAS[idioma_origen_key]
+idioma_destino = IDIOMAS[idioma_destino_key]
 
-archivo = st.file_uploader("Sube tu archivo",
-                           type=["pdf", "docx", "png", "jpg", "jpeg"] if tipo_archivo != "Word (.docx)" else ["docx"])
+tipo_archivo = st.radio(
+    "Tipo de documento a subir:",
+    ("PDF (texto digital)", "PDF escaneado o imagen", "Word (.docx)"),
+    horizontal=True
+)
 
-if archivo and st.button("Traducir documento"):
-    with st.spinner("⏳ Procesando..."):
-        # 1. Extraer texto según tipo
+if tipo_archivo == "Word (.docx)":
+    archivo = st.file_uploader("Sube tu archivo", type=["docx"])
+else:
+    archivo = st.file_uploader("Sube tu archivo", type=["pdf", "png", "jpg", "jpeg"])
+
+# ------------------------------------------------------------
+# Procesamiento al pulsar el botón
+# ------------------------------------------------------------
+if archivo and st.button("Traducir documento", type="primary"):
+    with st.spinner("⏳ Extrayendo texto..."):
+        # 1. Extraer el texto según el tipo de archivo
         if tipo_archivo == "PDF (texto digital)":
             texto_bruto = extraer_texto_pdf(archivo)
         elif tipo_archivo == "PDF escaneado o imagen":
             if archivo.type == "application/pdf":
                 texto_bruto = extraer_texto_pdf_escaneado(archivo)
-            else:  # imagen
-                imagen = Image.open(archivo)
-                texto_bruto = pytesseract.image_to_string(imagen, lang='spa+eng')
+            else:
+                texto_bruto = extraer_texto_imagen(archivo)
         else:  # Word
             texto_bruto = extraer_texto_docx(archivo)
 
         if not texto_bruto.strip():
-            st.error("No se pudo extraer texto. ¿El documento está vacío o la imagen es ilegible?")
+            st.error("❌ No se pudo extraer texto. ¿El documento está vacío o la imagen es ilegible?")
             st.stop()
 
-        # 2. Dividir en trozos
-        chunks = dividir_texto(texto_bruto, max_chars=3000)
-        traducciones = []
-        progreso = st.progress(0)
-        for i, chunk in enumerate(chunks):
+        st.success(f"✅ Texto extraído ({len(texto_bruto)} caracteres). Dividiendo en fragmentos...")
+
+    # 2. Dividir en trozos
+    chunks = dividir_texto(texto_bruto, max_chars=6000)
+    st.info(f"📦 El documento se ha dividido en {len(chunks)} fragmento(s) para su traducción.")
+
+    # 3. Traducir cada trozo con barra de progreso
+    traducciones = []
+    progreso = st.progress(0)
+    for i, chunk in enumerate(chunks):
+        with st.spinner(f"🌍 Traduciendo fragmento {i+1}/{len(chunks)}..."):
             trad = traducir_chunk(chunk, idioma_origen, idioma_destino)
             traducciones.append(trad)
-            progreso.progress((i+1)/len(chunks))
+            progreso.progress((i + 1) / len(chunks))
+        # Pequeña pausa para no saturar la API (aunque Groq es muy generoso, 1 s es prudente)
+        time.sleep(1)
 
-        # 3. Unir traducciones
-        markdown_final = "\n\n".join(traducciones)
+    # 4. Unir las traducciones
+    markdown_final = "\n\n".join(traducciones)
 
-        # 4. Mostrar y descargar
-        st.success("✅ Traducción completada")
-        st.markdown(markdown_final)
+    # 5. Mostrar resultado
+    st.success("🎉 ¡Traducción completada!")
+    st.markdown("### Vista previa de la traducción")
+    st.markdown(markdown_final)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.download_button("⬇️ Descargar Word",
-                               data=crear_docx_desde_markdown(markdown_final),
-                               file_name="traduccion.docx")
-        with col2:
-            st.download_button("⬇️ Descargar PDF",
-                               data=crear_pdf_desde_markdown(markdown_final),
-                               file_name="traduccion.pdf")
+    # 6. Botones de descarga
+    col1, col2 = st.columns(2)
+    with col1:
+        docx_bytes = crear_docx_desde_markdown(markdown_final)
+        st.download_button(
+            label="⬇️ Descargar Word",
+            data=docx_bytes,
+            file_name="traduccion.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    with col2:
+        pdf_bytes = crear_pdf_desde_markdown(markdown_final)
+        st.download_button(
+            label="⬇️ Descargar PDF",
+            data=pdf_bytes,
+            file_name="traduccion.pdf",
+            mime="application/pdf"
+        )
