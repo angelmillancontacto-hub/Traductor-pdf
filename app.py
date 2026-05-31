@@ -98,7 +98,7 @@ if archivo_subido is not None:
                 try:
                     respuesta = cliente_groq.chat.completions.create(
                         messages=[{"role": "user", "content": prompt}],
-                        model="llama3-70b-8192",
+                        model="llama-3.1-70b-versatile",
                         temperature=0.1 
                     )
                     
