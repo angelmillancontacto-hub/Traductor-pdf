@@ -116,7 +116,7 @@ if archivo_subido is not None:
                         if datos_orig:
                             rect_orig = fitz.Rect(datos_orig["bbox"])
                             # Ampliamos ligeramente la caja para dar margen
-                            rect_ampliado = rect_orig + (-2, -2, 10, 10) 
+                            rect_ampliado = rect_orig + (-2, -2, 50, 20) 
 
                             # Borramos el fondo
                             if datos_orig.get("is_image", False):
