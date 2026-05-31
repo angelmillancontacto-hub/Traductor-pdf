@@ -148,9 +148,9 @@ if archivo_subido is not None:
                     time.sleep(10) 
 
                 except Exception as e:
-                    st.warning(f"⚠️ Pausa técnica por límite de la API. Reintentando en 15 segundos...")
+                    st.error(f"⚠️ Error REAL de Gemini: {e}")
                     intentos += 1
-                    time.sleep(15)
+                    time.sleep(5)
 
             progreso = (num_pagina + 1) / len(doc)
             barra_progreso.progress(progreso)
