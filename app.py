@@ -153,8 +153,9 @@ if archivo_subido is not None:
                     time.sleep(2) 
 
                 except Exception as e:
+                    st.warning(f"⚠️ Pausa técnica en página {num_pagina + 1} por límite de la IA. Esperando 15 segundos...")
                     intentos += 1
-                    time.sleep(3)
+                    time.sleep(15)
 
             progreso = (num_pagina + 1) / len(doc)
             barra_progreso.progress(progreso)
