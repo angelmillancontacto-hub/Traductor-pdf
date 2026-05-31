@@ -81,14 +81,17 @@ if archivo_subido is not None:
                 continue
 
             prompt = f"""
-            Translate the following JSON array of text objects from {idioma_origen} to {idioma_destino}.
-            Keep the translation concise to fit the original bounding boxes.
-            DATA: {json.dumps(datos_para_gemini)}
-            RULES:
-            - Return ONLY a valid JSON array matching the exact structure.
-            - Modify ONLY the 'text' values.
-            - Do NOT wrap the JSON in Markdown code blocks.
-            - No conversational text.
+            You are an expert translator specializing in JSON data. Your task is to accurately translate the text content within a JSON array of text objects from {idioma_origen} to {idioma_destino}.
+
+            CRITICAL INSTRUCTIONS:
+            1. Focus exclusively on the string associated with the "text" key in each object. Ensure that every translated string is populated and not left empty.
+            2. Maintain brevity in your translations to ensure they fit the original layout and context.
+            3. Your output must be a valid JSON array that mirrors the structure of the input exactly.
+            4. Only modify the 'text' values; do not alter the 'id', 'bbox', 'size', 'color', and 'is_image' values in any way.
+            5. Deliver the output as raw JSON without any Markdown formatting or code blocks.
+
+            INPUT DATA: 
+            {json.dumps(datos_para_gemini)}
             """
 
             exito = False
