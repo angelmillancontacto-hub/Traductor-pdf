@@ -15,7 +15,7 @@ try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=API_KEY)
     # Usamos Gemini 1.5 Flash, ideal para tareas rápidas y estructuradas
-    modelo = genai.GenerativeModel('gemini-pro')
+    modelo = genai.GenerativeModel('gemini-2.5-flash')
 except Exception as e:
     st.error("Falta configurar la clave de API (GEMINI_API_KEY) en los secretos del servidor.")
     st.stop()
