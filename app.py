@@ -120,12 +120,12 @@ if archivo_subido is not None:
                     
                     for item in textos_traducidos:
                         id_bloque = str(item.get("id", "")) 
-                        texto_nuevo = item.get("text", "") # Si no hay texto, pone vacío
+                        texto_nuevo = item.get("text", "") 
                         
                         datos_orig = next((d for d in datos_para_gemini if str(d["id"]) == id_bloque), None)
                         
                         if datos_orig:
-                            # Hacemos el cuadro un poco más grande por si la traducción es muy larga
+                            # Hacemos el cuadro un poco más grande
                             rect_orig = fitz.Rect(datos_orig["bbox"])
                             rect_ampliado = rect_orig + (-5, -5, 5, 5) 
 
@@ -135,21 +135,23 @@ if archivo_subido is not None:
                                 pagina.add_redact_annot(rect_orig, text="", fill=(1, 1, 1)) 
                                 pagina.apply_redactions()
 
-                            # FORZAMOS TINTA NEGRA (0,0,0) PARA ASEGURARNOS DE QUE SE VEA
+                            # FORZAMOS TINTA NEGRA (0,0,0)
                             pagina.insert_textbox(rect_ampliado, texto_nuevo, fontsize=10, fontname="helv", color=(0,0,0))
                         else:
                             st.warning(f"⚠️ Se perdió el rastro del ID: {id_bloque}")
                     
                     exito = True 
-                    time.sleep(2)
+                    time.sleep(2) 
 
-            # Actualizar barra de progreso
+                except Exception as e:
+                    st.error(f"❌ Error detectado en la página {num_pagina + 1}: {e}")
+                    intentos += 1
+                    time.sleep(3)
+
             progreso = (num_pagina + 1) / len(doc)
             barra_progreso.progress(progreso)
 
-        estado_texto.success("¡Traducción completada con éxito!")
-        
-        # Convertir el PDF final a bytes para poder descargarlo
+        estado_texto.success("🎉 ¡Traducción completada!")
         pdf_bytes = doc.write()
         
         st.download_button(
@@ -158,3 +160,4 @@ if archivo_subido is not None:
             file_name="documento_traducido.pdf",
             mime="application/pdf"
         )
+        
