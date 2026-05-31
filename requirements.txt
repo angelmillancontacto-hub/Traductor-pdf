@@ -3,3 +3,6 @@ pymupdf
 google-generativeai
 python-docx
 fpdf
+pdf2image
+pytesseract
+Pillow
