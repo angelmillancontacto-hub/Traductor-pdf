@@ -112,30 +112,36 @@ if archivo_subido is not None:
                         contenido_respuesta = contenido_respuesta[:-3]
 
                     textos_traducidos = json.loads(contenido_respuesta)
+                    st.success(f"✅ ¡Groq tradujo con éxito la página {num_pagina + 1}!")
+                    
+                    # SUERO DE LA VERDAD: Mostrar en la web qué devolvió la IA
+                    with st.expander(f"👁️ Ver qué respondió la IA en la página {num_pagina + 1}"):
+                        st.json(textos_traducidos)
                     
                     for item in textos_traducidos:
-                        id_bloque = item["id"]
-                        texto_nuevo = item["text"]
-                        datos_orig = next((d for d in datos_para_gemini if d["id"] == id_bloque), None)
+                        id_bloque = str(item.get("id", "")) 
+                        texto_nuevo = item.get("text", "") # Si no hay texto, pone vacío
+                        
+                        datos_orig = next((d for d in datos_para_gemini if str(d["id"]) == id_bloque), None)
                         
                         if datos_orig:
-                            rect = fitz.Rect(datos_orig["bbox"])
+                            # Hacemos el cuadro un poco más grande por si la traducción es muy larga
+                            rect_orig = fitz.Rect(datos_orig["bbox"])
+                            rect_ampliado = rect_orig + (-5, -5, 5, 5) 
+
                             if datos_orig.get("is_image", False):
-                                pagina.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
+                                pagina.draw_rect(rect_orig, color=(1, 1, 1), fill=(1, 1, 1))
                             else:
-                                pagina.add_redact_annot(rect, text="", fill=(1, 1, 1)) 
+                                pagina.add_redact_annot(rect_orig, text="", fill=(1, 1, 1)) 
                                 pagina.apply_redactions()
 
-                            color_rgb = fitz.sRGB_to_pdf(datos_orig["color"])
-                            pagina.insert_textbox(rect, texto_nuevo, fontsize=datos_orig["size"], fontname="helv", color=color_rgb)
+                            # FORZAMOS TINTA NEGRA (0,0,0) PARA ASEGURARNOS DE QUE SE VEA
+                            pagina.insert_textbox(rect_ampliado, texto_nuevo, fontsize=10, fontname="helv", color=(0,0,0))
+                        else:
+                            st.warning(f"⚠️ Se perdió el rastro del ID: {id_bloque}")
                     
                     exito = True 
-                    time.sleep(2) 
-
-                except Exception as e:
-                    st.error(f"Error detectado: {e}")
-                    intentos += 1
-                    time.sleep(3)
+                    time.sleep(2)
 
             # Actualizar barra de progreso
             progreso = (num_pagina + 1) / len(doc)
