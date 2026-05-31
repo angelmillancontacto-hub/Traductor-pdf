@@ -15,7 +15,7 @@ st.write("Sube tu documento PDF. La IA extraerá el texto y las imágenes, lo tr
 
 # 1. Configuración de la API Key (Ahora se lee de forma segura desde los "Secrets" del servidor)
 try:
-    API_KEY = st.secrets["GROQ_API_KEY"]
+    API_KEY = st.secrets["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"]
     cliente_groq = Groq(api_key=API_KEY)
 except:
     st.error("Falta configurar la clave de API de Groq en los secretos del servidor.")
@@ -130,6 +130,7 @@ if archivo_subido is not None:
                     time.sleep(2) 
 
                 except Exception as e:
+                    st.error(f"Error detectado: {e}")
                     intentos += 1
                     time.sleep(3)
 
